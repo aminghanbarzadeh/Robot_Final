@@ -1,0 +1,470 @@
+/*=========================== Balance Stand ===========================*/
+/**
+ * FSM State that forces all legs to be on the ground and uses the QP
+ * Balance controller for instantaneous balance control.
+ */
+
+#include "FSM_State_BalanceStand.h"
+#include <Controllers/WBC_Ctrl/LocomotionCtrl/LocomotionCtrl.hpp>
+// Todo: robot height in balance stand state needs to be tuned.(48-49),
+//  and maybe gamepad command scales need to be modified. (223-244)
+/**
+ * Constructor for the FSM State that passes in state specific info to
+ * the generic FSM State constructor.
+ *
+ * @param _controlFSMData holds all of the relevant control data
+ */
+template <typename T>
+FSM_State_BalanceStand<T>::FSM_State_BalanceStand(
+    ControlFSMData<T>* _controlFSMData)
+    : FSM_State<T>(_controlFSMData, FSM_StateName::BALANCE_STAND,"BALANCE_STAND") {
+  // Set the pre controls safety checks
+  this->turnOnAllSafetyChecks();
+  // Turn off Foot pos command since it is set in WBC as operational task
+  this->checkPDesFoot = false;
+
+
+  // Initialize GRF to 0s
+  this->footFeedForwardForces = Mat34<T>::Zero();
+
+  _wbc_ctrl = new LocomotionCtrl<T>(_controlFSMData->_quadruped->buildModel());
+  _wbc_data = new LocomotionCtrlData<T>();
+
+  _wbc_ctrl->setFloatingBaseWeight(1000.);
+}
+
+template <typename T>
+void FSM_State_BalanceStand<T>::onEnter() {
+  // Default is to not transition
+  this->nextStateName = this->stateName;
+
+  // Reset the transition data
+  this->transitionData.zero();
+
+  // Always set the gait to be standing in this state
+  this->_data->_gaitScheduler->gaitData._nextGait = GaitType::STAND;
+  
+  _ini_body_pos = (this->_data->_stateEstimator->getResult()).position;
+
+  if(this->_data->_quadruped->_robotType == RobotType::MINI_CHEETAH
+    && _ini_body_pos[2] < 0.25) {
+      _ini_body_pos[2] = 0.30;
+  }else if(this->_data->_quadruped->_robotType == RobotType::IUST
+    && _ini_body_pos[2] > 0.35) {
+    _ini_body_pos[2] = 0.35;
+  }
+
+  last_height_command = _ini_body_pos[2];
+
+  _ini_body_ori_rpy = (this->_data->_stateEstimator->getResult()).rBody * (this->_data->_stateEstimator->getResult()).rpy;
+  _body_weight = (this->_data->_quadruped->_bodyMass) * 9.81;
+}
+
+/**
+ * Calls the functions to be executed on each control loop iteration.
+ */
+template <typename T>
+void FSM_State_BalanceStand<T>::run() {
+  Vec4<T> contactState;
+  contactState<< 0.5, 0.5, 0.5, 0.5;
+  this->_data->_stateEstimator->setContactPhase(contactState);
+  BalanceStandStep();
+}
+
+/**
+ * Manages which states can be transitioned into either by the user
+ * commands or state event triggers.
+ *
+ * @return the enumerated FSM state name to transition into
+ */
+template <typename T>
+FSM_StateName FSM_State_BalanceStand<T>::checkTransition() {
+  // Get the next state
+//  _iter++;
+
+  // Switch FSM control mode
+  switch ((int)this->_data->controlParameters->control_mode) {
+    case K_BALANCE_STAND:
+      // Normal operation for state based transitions
+
+      // Need a working state estimator for this
+      /*if (velocity > v_max) {
+        // Notify the State of the upcoming next state
+        this->nextStateName = FSM_StateName::LOCOMOTION;
+
+        // Transition instantaneously to locomotion state on request
+        this->transitionDuration = 0.0;
+
+        // Set the next gait in the scheduler to
+        this->_data->_gaitScheduler->gaitData._nextGait = GaitType::TROT;
+
+      }*/
+
+      // TEST: in place to show automatic non user requested transitions
+      /*if (_iter >= 5458) {
+        this->nextStateName = FSM_StateName::LOCOMOTION;
+        this->_data->controlParameters->control_mode = K_LOCOMOTION;
+        this->transitionDuration = 0.0;
+        this->_data->_gaitScheduler->gaitData._nextGait =
+            GaitType::AMBLE;  // TROT; // Or get whatever is in
+                              // main_control_settings
+        _iter = 0;
+      }*/
+      break;
+
+    case K_STAND_UP:
+      this->nextStateName = FSM_StateName::STAND_UP;
+      // Transition time is immediate
+      this->transitionDuration = 0.0;
+      break;
+
+    case K_SQUAT_DOWN:
+      this->nextStateName = FSM_StateName::SQUAT_DOWN;
+      // Transition time is immediate
+      this->transitionDuration = 0.0;
+      break;
+
+    case K_LOCOMOTION:
+      // Requested change to balance stand
+      this->nextStateName = FSM_StateName::LOCOMOTION;
+
+      // Transition instantaneously to locomotion state on request
+      this->transitionDuration = 0.0;
+
+      // Set the next gait in the scheduler to
+      this->_data->_gaitScheduler->gaitData._nextGait = GaitType::TROT;
+      break;
+
+    case K_PASSIVE:
+      this->nextStateName = FSM_StateName::PASSIVE;
+      // Transition time is immediate
+      this->transitionDuration = 0.0;
+
+      break;
+
+/*    case K_VISION:
+      this->nextStateName = FSM_StateName::VISION;
+      // Transition time is immediate
+      this->transitionDuration = 0.0;
+      break;*/
+
+    case K_RECOVERY_STAND:
+      this->nextStateName = FSM_StateName::RECOVERY_STAND;
+      // Transition time is immediate
+      this->transitionDuration = 0.0;
+      break;
+
+/*    case K_BACKFLIP:
+      this->nextStateName = FSM_StateName::BACKFLIP;
+      this->transitionDuration = 0.;
+      break;*/
+
+    default:
+      std::cout << "[CONTROL FSM] Bad Request: Cannot transition from "
+                << K_BALANCE_STAND << " to "
+                << this->_data->controlParameters->control_mode << std::endl;
+  }
+
+  // Return the next state name to the FSM
+  return this->nextStateName;
+}
+
+/**
+ * Handles the actual transition for the robot between states.
+ * Returns true when the transition is completed.
+ *
+ * @return true if transition is complete
+ */
+template <typename T>
+TransitionData<T> FSM_State_BalanceStand<T>::transition() {
+  // Switch FSM control mode
+  switch (this->nextStateName) {
+    case FSM_StateName::LOCOMOTION:
+      BalanceStandStep();
+
+      _iter++;
+      if (_iter >= this->transitionDuration * 1000) {
+        this->transitionData.done = true;
+      } else {
+        this->transitionData.done = false;
+      }
+
+      break;
+
+    case FSM_StateName::PASSIVE:
+      this->turnOffAllSafetyChecks();
+      this->transitionData.done = true;
+      break;
+
+    case FSM_StateName::STAND_UP:
+      this->transitionData.done = true;
+      break;
+
+    case FSM_StateName::SQUAT_DOWN:
+      this->transitionData.done = true;
+      break;
+
+    case FSM_StateName::RECOVERY_STAND:
+      this->transitionData.done = true;
+      break;
+
+/*    case FSM_StateName::BACKFLIP:
+      this->transitionData.done = true;
+      break;
+
+    case FSM_StateName::VISION:
+      this->transitionData.done = true;
+      break;*/
+
+    default:
+      std::cout << "[CONTROL FSM] Something went wrong in transition"
+                << std::endl;
+  }
+
+  // Return the transition data to the FSM
+  return this->transitionData;
+}
+
+/**
+ * Cleans up the state information on exiting the state.
+ */
+template <typename T>
+void FSM_State_BalanceStand<T>::onExit() {
+  _iter = 0;
+}
+
+/**
+ * Calculate the commands for the leg controllers for each of the feet.
+ */
+template <typename T>
+void FSM_State_BalanceStand<T>::BalanceStandStep() {
+
+  _wbc_data->pBody_des = _ini_body_pos;
+  _wbc_data->vBody_des.setZero();
+  _wbc_data->aBody_des.setZero();
+
+  balancetest_rpy = (this->_data->_stateEstimator->getResult()).rBody * (this->_data->_stateEstimator->getResult()).rpy;
+//  _wbc_data->pBody_des[2] = 0.505;
+  _wbc_data->pBody_RPY_des = _ini_body_ori_rpy;
+  if(this->_data->controlParameters->use_rc){ // remote controller in reality
+    const rc_control_settings* rc_cmd = this->_data->_desiredStateCommand->rcCommand;
+
+    if (rc_cmd->height_variation > 0.99 || zmove == true)
+    {
+
+      zmove = true;
+      if (this->_data->_stateEstimator->getResult().position[2] < 0.38 && up1)
+      { 
+        //std::cout << "up1 " << std::endl;
+        heightchange1 += 0.0008;
+        _wbc_data->pBody_des[2] += heightchange1;
+        lastheight = _wbc_data->pBody_des[2];
+      }
+      if (this->_data->_stateEstimator->getResult().position[2] > 0.38 || down)
+      {
+        //std::cout << "down" << std::endl;
+        down = true;
+        up1 = false;
+        heightchange1 = 0.0;
+        lastheight -= 0.0008;
+        _wbc_data->pBody_des[2] = lastheight;
+      }
+      if (this->_data->_stateEstimator->getResult().position[2] < 0.25 || up2)
+      {
+        //std::cout << "up2" << std::endl;
+        down = false;
+        up2 = true;
+        lastheight += 0.0008;
+        _wbc_data->pBody_des[2] = lastheight;
+      }
+      if (this->_data->_stateEstimator->getResult().position[2] > _ini_body_pos[2] && up2)
+      {
+        //std::cout << "stop" << std::endl;
+        zmove = false;
+        up2 = false;
+        up1 = true;
+      }
+
+    }
+    
+
+    //roll
+    if ( rc_cmd->rpy_des[0] > 0.99 || rollmove == true)
+    {
+
+      rollmove = true;
+      if (balancetest_rpy[0] < 0.3 && up1)
+      { 
+        //std::cout << "up1 " << std::endl;
+        heightchange1 += 0.00085;
+        _wbc_data->pBody_RPY_des[0] += heightchange1;
+        lastroll = _wbc_data->pBody_RPY_des[0];
+      }
+      if (balancetest_rpy[0] > 0.3 || down)
+      {
+        //std::cout << "down" << std::endl;
+        down = true;
+        up1 = false;
+        heightchange1 = 0.0;
+        lastroll -= 0.00085;
+        _wbc_data->pBody_RPY_des[0] = lastroll;
+      }
+      if (balancetest_rpy[0] < -0.3 || up2)
+      {
+        //std::cout << "up2" << std::endl;
+        down = false;
+        up2 = true;
+        lastroll += 0.00085;
+        _wbc_data->pBody_RPY_des[0] = lastroll;
+      }
+      if (balancetest_rpy[0] > _ini_body_ori_rpy[0] && up2)
+      {
+        //std::cout << "stop" << std::endl;
+        rollmove = false;
+        up2 = false;
+        up1 = true;
+      }
+
+    }
+
+    //pitch
+    if ( rc_cmd->rpy_des[1] > 0.99 || pitchmove == true)
+    {
+
+      pitchmove = true;
+      if (balancetest_rpy[1] < 0.25 && up1)
+      { 
+        //std::cout << "up1 " << std::endl;
+        heightchange1 += 0.00085;
+        _wbc_data->pBody_RPY_des[1] += heightchange1;
+        lastpitch = _wbc_data->pBody_RPY_des[1];
+      }
+      if (balancetest_rpy[1] > 0.25 || down)
+      {
+        //std::cout << "down" << std::endl;
+        down = true;
+        up1 = false;
+        heightchange1 = 0.0;
+        lastpitch -= 0.00085;
+        _wbc_data->pBody_RPY_des[1] = lastpitch;
+      }
+      if (balancetest_rpy[1] < -0.25 || up2)
+      {
+        //std::cout << "up2" << std::endl;
+        down = false;
+        up2 = true;
+        lastpitch += 0.00085;
+        _wbc_data->pBody_RPY_des[1] = lastpitch;
+      }
+      if (balancetest_rpy[1] > _ini_body_ori_rpy[1] && up2)
+      {
+        //std::cout << "stop" << std::endl;
+        pitchmove = false;
+        up2 = false;
+        up1 = true;
+      }
+
+    }
+    //yaw
+    if ( rc_cmd->rpy_des[2] > 0.5 || yawmove == true)
+    {
+
+      yawmove = true;
+      if (balancetest_rpy[2] < 0.15 && up1)
+      { 
+        //std::cout << "up1 " << std::endl;
+        heightchange1 += 0.0007;
+        _wbc_data->pBody_RPY_des[2] += heightchange1;
+        lastyaw = _wbc_data->pBody_RPY_des[2];
+      }
+      if (balancetest_rpy[2] > 0.15 || down)
+      {
+        //std::cout << "down" << std::endl;
+        down = true;
+        up1 = false;
+        heightchange1 = 0.0;
+        lastyaw -= 0.0007;
+        _wbc_data->pBody_RPY_des[2] = lastyaw;
+      }
+      if (balancetest_rpy[2] < -0.15 || up2)
+      {
+        //std::cout << "up2" << std::endl;
+        down = false;
+        up2 = true;
+        lastyaw += 0.0007;
+        _wbc_data->pBody_RPY_des[2] = lastyaw;
+      }
+      if (balancetest_rpy[2] > _ini_body_ori_rpy[2] && up2)
+      {
+        //std::cout << "stop" << std::endl;
+        yawmove = false;
+        up2 = false;
+        up1 = true;
+      }
+    }
+
+
+
+    // Orientation
+    // _wbc_data->pBody_RPY_des[0] = 0.3*rc_cmd->rpy_des[0] * rollLimit;
+    // _wbc_data->pBody_RPY_des[1] = 0.3*rc_cmd->rpy_des[1] * pitchLimit;
+    // _wbc_data->pBody_RPY_des[2] -= 0.3*rc_cmd->rpy_des[2] * yawLimit;
+//      float _body_height = 0.;
+//      _body_height += rc_cmd->height_variation * 0.08;
+//      float step_height = rc_cmd->step_height*0.1;
+//      printf("step height：%f\n", step_height);
+//      printf("body height：%f\n", _body_height);
+    // Height
+    //_wbc_data->pBody_des[2] += 0.03 * rc_cmd->height_variation;
+  }else{ // in simulation
+    // Orientation
+    _wbc_data->pBody_RPY_des[0] = 
+      this->_data->_desiredStateCommand->gamepadCommand->leftStickAnalog[0] * rollLimit;
+     _wbc_data->pBody_RPY_des[1] = 
+      this->_data->_desiredStateCommand->gamepadCommand->rightStickAnalog[0] * pitchLimit;
+    _wbc_data->pBody_RPY_des[2] -= 
+      this->_data->_desiredStateCommand->gamepadCommand->rightStickAnalog[1] * yawLimit;
+    
+    // Height
+    _wbc_data->pBody_des[2] += 
+      0.1 * this->_data->_desiredStateCommand->gamepadCommand->leftStickAnalog[1];
+  }
+  _wbc_data->vBody_Ori_des.setZero();
+
+// Blance  Limitation
+  if (abs(_wbc_data->pBody_RPY_des[0]) > rollLimit){
+      _wbc_data->pBody_RPY_des[0] = (_wbc_data->pBody_RPY_des[0] > 0) ? rollLimit : (-rollLimit);
+  } else if (abs(_wbc_data->pBody_RPY_des[1]) > pitchLimit){
+      _wbc_data->pBody_RPY_des[1] = (_wbc_data->pBody_RPY_des[1] > 0) ? pitchLimit : (-pitchLimit);
+  } else if (abs(_wbc_data->pBody_RPY_des[2]) > yawLimit){
+      _wbc_data->pBody_RPY_des[2] = (_wbc_data->pBody_RPY_des[2] > 0) ? yawLimit : (-yawLimit);
+  } else if (_wbc_data->pBody_des[2] > heightLimitUpper){
+      _wbc_data->pBody_des[2] = heightLimitUpper;
+  } else if (_wbc_data->pBody_des[2] < heightLimitLower){
+      _wbc_data->pBody_des[2] = heightLimitLower;
+  }
+//std::cout<<_wbc_data->pBody_RPY_des[0]<<" "<<_wbc_data->pBody_RPY_des[1]<<" "<<_wbc_data->pBody_RPY_des[2]<<" "<<_wbc_data->pBody_des[2]<<std::endl;
+  for(size_t i(0); i<4; ++i){
+    _wbc_data->pFoot_des[i].setZero();
+    _wbc_data->vFoot_des[i].setZero();
+    _wbc_data->aFoot_des[i].setZero();
+    _wbc_data->Fr_des[i].setZero();
+    _wbc_data->Fr_des[i][2] = _body_weight/4.;
+    _wbc_data->contact_state[i] = true;
+  }
+  
+  if(this->_data->_desiredStateCommand->trigger_pressed) {
+    _wbc_data->pBody_des[2] = 0.05;
+
+    if(last_height_command - _wbc_data->pBody_des[2] > 0.001) {
+      _wbc_data->pBody_des[2] = last_height_command - 0.001;
+    }
+  }
+  last_height_command = _wbc_data->pBody_des[2];
+//  printf("rpy: [%f, %f, %f]\n",_wbc_data->pBody_RPY_des[0],_wbc_data->pBody_RPY_des[1],_wbc_data->pBody_RPY_des[2]);
+//  printf("height: %f\n\n",_wbc_data->pBody_des[2]);
+  _wbc_ctrl->run(_wbc_data, *this->_data);
+}
+
+// template class FSM_State_BalanceStand<double>;
+template class FSM_State_BalanceStand<float>;
