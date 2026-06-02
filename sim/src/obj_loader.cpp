@@ -1,4 +1,3 @@
-#include <cstdint>
 /*! @file obj_loader.cpp
  *  @brief Utility to load .obj files, containing 3D models of robots.
  *
