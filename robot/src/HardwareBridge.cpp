@@ -63,7 +63,7 @@ void HardwareBridge::initCommon() {
   _interfaceLCM.subscribe("interface_request", &HardwareBridge::handleControlParameter, this);
 
   printf("[HardwareBridge] Start interface LCM handler\n");
-  // _interfaceLcmThread = std::thread(&HardwareBridge::handleInterfaceLCM, this);
+  _interfaceLcmThread = std::thread(&HardwareBridge::handleInterfaceLCM, this);
   printf("I'm OK\n");
 }
 
