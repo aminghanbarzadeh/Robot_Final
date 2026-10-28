@@ -1,0 +1,26 @@
+cmake_minimum_required(VERSION 3.1)
+project(CustomController)
+
+set(CMAKE_CXX_STANDARD 14)
+
+include_directories(include)
+
+file(GLOB custom_controller_srcs "user/CustomController/*.cpp" "user/CustomController/*.c")
+
+add_executable(custom_controller ${custom_controller_srcs})
+
+# Find required libraries from the SDK lib folder
+link_directories(${CMAKE_CURRENT_SOURCE_DIR}/lib)
+
+target_link_libraries(custom_controller
+        robot
+        biomimetics
+        pthread
+        lcm
+        inih
+        dynacore_param_handler
+        soem)
+
+if(CMAKE_SYSTEM_NAME MATCHES Linux)
+    target_link_libraries(custom_controller rt)
+endif()
